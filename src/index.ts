@@ -42,19 +42,26 @@ const ESLINT_DEFAULT_CONFIG: ESLint.ConfigData = {
 };
 
 
-function printErrors(scriptInclude: SysScriptInclude, results: ESLint.LintResult[]) {
+function printErrors(name: string, results: ESLint.LintResult[], firstLineOnly = false) {
     let hadMessages = false;
 
     for (const res of results) {
         for (const msg of res.messages) {
             hadMessages = true;
-            const offendingLines = res.source?.split('\n').slice(msg.line - 1, msg.endLine ?? msg.line + 1);
-            console.log(`${scriptInclude.name} - [${msg.ruleId}] ${msg.message} (${msg.line}:${msg.column})`);
+            const offendingLines = res.source?.split('\n').slice(
+                msg.line - 1,
+                firstLineOnly
+                    ? msg.line + 1
+                    : msg.endLine ?? msg.line + 1
+            );
+            console.log(`${name} - [${msg.ruleId}] ${msg.message} (${msg.line}:${msg.column})`);
 
             if (!offendingLines) continue;
 
             const columnStart = msg.column;
-            const columnEnd = msg.endColumn ?? columnStart + 1;
+            const columnEnd = firstLineOnly
+                ? msg.endLine ? columnStart + 1 : msg.endColumn ?? columnStart + 1
+                : msg.endColumn ?? columnStart + 1;
 
             for (let i = 0; i < offendingLines.length; i++) {
                 const line = offendingLines[i];
@@ -86,17 +93,58 @@ function printErrors(scriptInclude: SysScriptInclude, results: ESLint.LintResult
 }
 
 
+
 (async () => {
-    const json = (JSON.parse(readFileSync('./sys_script.json', 'utf-8')) as { records: SysScriptInclude[] })
-    const scriptIncludes = JSON.parse(readFileSync('./sys_script_include.json', 'utf-8')) as { records: SysScriptInclude[] };
+    const businessRules = (JSON.parse(readFileSync('./snow_src_files/sys_script.json', 'utf-8')) as { records: SysScriptInclude[] })
+    const scriptIncludes = JSON.parse(readFileSync('./snow_src_files/sys_script_include.json', 'utf-8')) as { records: SysScriptInclude[] };
 
-    // const thriveSecurityUtil = json.records.find(r => r.name === 'ThriveSecurityUtil') as SysScriptInclude;
-    // const results = await eslint.lintText(thriveSecurityUtil?.script);
-    // printErrors(results);
+    const scriptIncludeResults = new RegExp(
+        (await Promise.all(scriptIncludes.records
+            .filter(e => e.script)
+            .map(async (r) => {
+                const eslint = new ESLint({
+                    useEslintrc: false,
+                    overrideConfig: {
+                        ...ESLINT_DEFAULT_CONFIG,
+                        globals: {
+                            'current': 'readonly',
+                            'previous': 'readonly',
+                            'sn_ws': 'readonly',
+                            'GlideRecord': 'readonly',
+                            'gs': 'readonly',
+                            'Class': 'readonly',
+                            'GlideAggregate': 'readonly',
+                            'GlideFilter': 'readonly',
+                            'GlideElement': 'readonly',
+                            'GlideDateTime': 'readonly',
+                            'global': 'readonly',
+                            [r.name]: 'writable',
+                            ...scriptIncludes.records.reduce((acc, { name }) => {
+                                if (name !== r.name) acc[name] = 'readonly';
+                                return acc;
+                            }, {} as Record<string, 'readonly'>)
+                        }
+                    }
+                });
 
-    const results = await Promise.all(json.records
+                const lint = await eslint.lintText((r.script as any).replaceAll('\t', '    '));
+                // printErrors(r.name, lint);
+                return { name: r.name, lint, updatedBy: r.sys_updated_by };
+            })))
+            .filter(e => e.lint[0].messages.length > 0)
+            .map(e => e.name)
+            .join('|')
+    );
+
+
+    const results = await Promise.all(businessRules.records
         .filter(e => e.script)
-        .slice(0, 1000)
+        // .filter(e => !["admin", "glide.maint", "maint"].includes(e.sys_created_by))
+        .filter(e =>
+            e.sys_created_by.trim().toLowerCase().endsWith('@thrivenetworks.com')
+            || e.sys_updated_by.trim().toLowerCase().endsWith('@thrivenetworks.com')
+        )
+        // .filter(e => (e as any).collection === 'cmn_location')
         .map(async (r) => {
             const eslint = new ESLint({
                 useEslintrc: false,
@@ -118,33 +166,49 @@ function printErrors(scriptInclude: SysScriptInclude, results: ESLint.LintResult
                         ...scriptIncludes.records.reduce((acc, { name }) => {
                             if (name !== r.name) acc[name] = 'readonly';
                             return acc;
-                        }, { } as Record<string, 'readonly'>)
+                        }, {} as Record<string, 'readonly'>)
                     }
                 }
             });
 
             const lint = await eslint.lintText((r.script as any).replaceAll('\t', '    '));
-            printErrors(r, lint);
-            return { name: r.name, lint };
+            // printErrors(r.name, lint, true);
+            return { name: r.name, lint, updatedBy: r.sys_updated_by };
         }));
 
-    const agg = results.reduce((acc, { name, lint: [res] }) => {
-        if (res.messages.length > 0) acc[name] = res.messages.length;
-        return acc;
-    }, {} as Record<string, number>);
+    // const agg = results.reduce((acc, { name, lint: [res] }) => {
+    //     if (res.messages.length > 0) acc[name] = res.messages.length;
+    //     return acc;
+    // }, {} as Record<string, number>);
 
-    console.log(agg);
-    console.log();
-    const totalAtLeastOneErr = Object.values(agg).length;
-    console.log(`${totalAtLeastOneErr} / ${json.records.length} (${(totalAtLeastOneErr / json.records.length * 100).toFixed(2)}%)`);
-    console.log();
+    // // console.log(agg);
+    // console.log(
+    //     Object.entries(agg)
+    //         .sort((a, b) => b[1] - a[1])
+    //         .map(([name, count]) => `${name} (${results.find(e => e.name === name)?.updatedBy}) - ${count}`)
+    //         .join('\n')
+    // );
+    // console.log();
+    // const totalAtLeastOneErr = Object.values(agg).length;
+    // console.log(`${totalAtLeastOneErr} / ${results.length} (${(totalAtLeastOneErr / results.length * 100).toFixed(2)}%)`);
+    // console.log();
 
-    console.log(results.reduce((acc, { name, lint: [res] }) => {
-        res.messages.forEach(e => {
-            if (!acc[String(e.ruleId)]) acc[String(e.ruleId)] = 1;
-            else acc[String(e.ruleId)]++;
-        });
-        return acc;
-    }, {} as any));
+    // console.log(results.reduce((acc, { name, lint: [res] }) => {
+    //     res.messages.forEach(e => {
+    //         if (!acc[String(e.ruleId)]) acc[String(e.ruleId)] = 1;
+    //         else acc[String(e.ruleId)]++;
+    //     });
+    //     return acc;
+    // }, {} as any));
+
+    const potentialWorst = results
+        .filter(e => e.lint[0].messages.length > 0)
+        .filter(e => e.lint[0].source && scriptIncludeResults.test(e.lint[0].source))
+
+    potentialWorst.forEach(e => {
+        console.log(`${e.name} (${e.updatedBy}) - ${scriptIncludeResults.exec(e.lint[0].source as string)}`);
+        printErrors(e.name, e.lint);
+    });
+
 
 })().catch(console.error);
